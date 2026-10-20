@@ -39,7 +39,7 @@ Hacked together by / Copyright 2022, Ross Wightman
 
 import math
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from functools import partial
 from typing import Callable, Optional, Union, Tuple, List
 
@@ -55,7 +55,8 @@ from lib.models_timm.layers import Mlp, ConvMlp, DropPath, ClassifierHead, trunc
 from lib.models_timm.layers import create_attn, get_act_layer, get_norm_layer, get_norm_act_layer, create_conv2d
 from lib.models_timm.layers import to_2tuple, extend_tuple, make_divisible, _assert
 from lib.models_timm.registry import register_model
-from lib.models_timm.vision_transformer_relpos import RelPosMlp, RelPosBias  # FIXME move these to common location
+# FIXME move these to common location
+from lib.models_timm.vision_transformer_relpos import RelPosMlp, RelPosBias
 
 __all__ = ['MaxxVitCfg', 'MaxxVitConvCfg', 'MaxxVitTransformerCfg', 'MaxxVit']
 
@@ -192,7 +193,8 @@ class MaxxVitTransformerCfg:
 class MaxxVitConvCfg:
     block_type: str = 'mbconv'
     expand_ratio: float = 4.0
-    expand_output: bool = True  # calculate expansion channels from output (vs input chs)
+    # calculate expansion channels from output (vs input chs)
+    expand_output: bool = True
     kernel_size: int = 3
     group_size: int = 1  # 1 == depthwise
     pre_norm_act: bool = False  # activation after pre-norm
@@ -204,7 +206,8 @@ class MaxxVitConvCfg:
     attn_layer: str = 'se'
     attn_act_layer: str = 'silu'
     attn_ratio: float = 0.25
-    init_values: Optional[float] = 1e-6  # for ConvNeXt block, ignored by MBConv
+    # for ConvNeXt block, ignored by MBConv
+    init_values: Optional[float] = 1e-6
     act_layer: str = 'gelu'
     norm_layer: str = ''
     norm_layer_cl: str = ''
@@ -230,8 +233,9 @@ class MaxxVitCfg:
     block_type: Tuple[Union[str, Tuple[str, ...]], ...] = ('C', 'C', 'T', 'T')
     stem_width: Union[int, Tuple[int, int]] = 64
     stem_bias: bool = True
-    conv_cfg: MaxxVitConvCfg = MaxxVitConvCfg()
-    transformer_cfg: MaxxVitTransformerCfg = MaxxVitTransformerCfg()
+    conv_cfg: MaxxVitConvCfg = field(default_factory=MaxxVitConvCfg)
+    transformer_cfg: MaxxVitTransformerCfg = field(
+        default_factory=MaxxVitTransformerCfg)
     weight_init: str = 'vit_eff'
 
 
@@ -686,6 +690,7 @@ model_cfgs = dict(
 
 class Attention2d(nn.Module):
     """ multi-head attention for 2D NCHW tensors"""
+
     def __init__(
             self,
             dim: int,
@@ -705,7 +710,8 @@ class Attention2d(nn.Module):
         self.scale = dim_head ** -0.5
 
         self.qkv = nn.Conv2d(dim, dim_attn * 3, 1, bias=bias)
-        self.rel_pos = rel_pos_cls(num_heads=self.num_heads) if rel_pos_cls else None
+        self.rel_pos = rel_pos_cls(
+            num_heads=self.num_heads) if rel_pos_cls else None
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Conv2d(dim_attn, dim_out, 1, bias=bias)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -713,7 +719,8 @@ class Attention2d(nn.Module):
     def forward(self, x, shared_rel_pos: Optional[torch.Tensor] = None):
         B, C, H, W = x.shape
 
-        q, k, v = self.qkv(x).view(B, self.num_heads, self.dim_head * 3, -1).chunk(3, dim=2)
+        q, k, v = self.qkv(x).view(B, self.num_heads,
+                                   self.dim_head * 3, -1).chunk(3, dim=2)
 
         attn = (q.transpose(-2, -1) @ k) * self.scale
         if self.rel_pos is not None:
@@ -731,6 +738,7 @@ class Attention2d(nn.Module):
 
 class AttentionCl(nn.Module):
     """ Channels-last multi-head attention (B, ..., C) """
+
     def __init__(
             self,
             dim: int,
@@ -751,7 +759,8 @@ class AttentionCl(nn.Module):
         self.scale = dim_head ** -0.5
 
         self.qkv = nn.Linear(dim, dim_attn * 3, bias=bias)
-        self.rel_pos = rel_pos_cls(num_heads=self.num_heads) if rel_pos_cls else None
+        self.rel_pos = rel_pos_cls(
+            num_heads=self.num_heads) if rel_pos_cls else None
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim_attn, dim_out, bias=bias)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -760,7 +769,8 @@ class AttentionCl(nn.Module):
         B = x.shape[0]
         restore_shape = x.shape[:-1]
 
-        q, k, v = self.qkv(x).view(B, -1, self.num_heads, self.dim_head * 3).transpose(1, 2).chunk(3, dim=3)
+        q, k, v = self.qkv(x).view(B, -1, self.num_heads,
+                                   self.dim_head * 3).transpose(1, 2).chunk(3, dim=3)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         if self.rel_pos is not None:
@@ -802,7 +812,7 @@ class Downsample2d(nn.Module):
     """ A downsample pooling module supporting several maxpool and avgpool modes
     * 'max' - MaxPool2d w/ kernel_size 3, stride 2, padding 1
     * 'max2' - MaxPool2d w/ kernel_size = stride = 2
-    * 'avg' - AvgPool2d w/ kernel_size 3, stride 2, padding 1
+    * 'avg' - AvgPool2d w/ kernel_size 3, stride 2, padding 1, count_include_pad=False
     * 'avg2' - AvgPool2d w/ kernel_size = stride = 2
     """
 
@@ -820,7 +830,8 @@ class Downsample2d(nn.Module):
         elif pool_type == 'max2':
             self.pool = nn.MaxPool2d(2)  # kernel_size == stride == 2
         elif pool_type == 'avg':
-            self.pool = nn.AvgPool2d(kernel_size=3, stride=2, padding=1, count_include_pad=False)
+            self.pool = nn.AvgPool2d(
+                kernel_size=3, stride=2, padding=1, count_include_pad=False)
         else:
             self.pool = nn.AvgPool2d(2)  # kernel_size == stride == 2
 
@@ -883,7 +894,8 @@ class TransformerBlock2d(nn.Module):
         act_layer = get_act_layer(cfg.act_layer)
 
         if stride == 2:
-            self.shortcut = Downsample2d(dim, dim_out, pool_type=cfg.pool_type, bias=cfg.shortcut_bias)
+            self.shortcut = Downsample2d(
+                dim, dim_out, pool_type=cfg.pool_type, bias=cfg.shortcut_bias)
             self.norm1 = nn.Sequential(OrderedDict([
                 ('norm', norm_layer(dim)),
                 ('down', Downsample2d(dim, dim, pool_type=cfg.pool_type)),
@@ -903,8 +915,10 @@ class TransformerBlock2d(nn.Module):
             attn_drop=cfg.attn_drop,
             proj_drop=cfg.proj_drop
         )
-        self.ls1 = LayerScale2d(dim_out, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
-        self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.ls1 = LayerScale2d(
+            dim_out, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
+        self.drop_path1 = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
         self.norm2 = norm_layer(dim_out)
         self.mlp = ConvMlp(
@@ -912,14 +926,17 @@ class TransformerBlock2d(nn.Module):
             hidden_features=int(dim_out * cfg.expand_ratio),
             act_layer=act_layer,
             drop=cfg.proj_drop)
-        self.ls2 = LayerScale2d(dim_out, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
-        self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.ls2 = LayerScale2d(
+            dim_out, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
+        self.drop_path2 = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
     def init_weights(self, scheme=''):
         named_apply(partial(_init_transformer, scheme=scheme), self)
 
     def forward(self, x, shared_rel_pos: Optional[torch.Tensor] = None):
-        x = self.shortcut(x) + self.drop_path1(self.ls1(self.attn(self.norm1(x), shared_rel_pos=shared_rel_pos)))
+        x = self.shortcut(
+            x) + self.drop_path1(self.ls1(self.attn(self.norm1(x), shared_rel_pos=shared_rel_pos)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
 
@@ -940,7 +957,8 @@ def _init_conv(module, name, scheme=''):
                 nn.init.zeros_(module.bias)
         else:
             # efficientnet like
-            fan_out = module.kernel_size[0] * module.kernel_size[1] * module.out_channels
+            fan_out = module.kernel_size[0] * \
+                module.kernel_size[1] * module.out_channels
             fan_out //= module.groups
             nn.init.normal_(module.weight, 0, math.sqrt(2.0 / fan_out))
             if module.bias is not None:
@@ -959,6 +977,7 @@ def num_groups(group_size, channels):
 class MbConvBlock(nn.Module):
     """ Pre-Norm Conv Block - 1x1 - kxk - 1x1, w/ inverted bottleneck (expand)
     """
+
     def __init__(
             self,
             in_chs: int,
@@ -969,12 +988,15 @@ class MbConvBlock(nn.Module):
             drop_path: float = 0.
     ):
         super(MbConvBlock, self).__init__()
-        norm_act_layer = partial(get_norm_act_layer(cfg.norm_layer, cfg.act_layer), eps=cfg.norm_eps)
-        mid_chs = make_divisible((out_chs if cfg.expand_output else in_chs) * cfg.expand_ratio)
+        norm_act_layer = partial(get_norm_act_layer(
+            cfg.norm_layer, cfg.act_layer), eps=cfg.norm_eps)
+        mid_chs = make_divisible(
+            (out_chs if cfg.expand_output else in_chs) * cfg.expand_ratio)
         groups = num_groups(cfg.group_size, mid_chs)
 
         if stride == 2:
-            self.shortcut = Downsample2d(in_chs, out_chs, pool_type=cfg.pool_type, bias=cfg.output_bias)
+            self.shortcut = Downsample2d(
+                in_chs, out_chs, pool_type=cfg.pool_type, bias=cfg.output_bias)
         else:
             self.shortcut = nn.Identity()
 
@@ -992,7 +1014,8 @@ class MbConvBlock(nn.Module):
 
         self.pre_norm = norm_act_layer(in_chs, apply_act=cfg.pre_norm_act)
         if stride_pool > 1:
-            self.down = Downsample2d(in_chs, in_chs, pool_type=cfg.downsample_pool_type)
+            self.down = Downsample2d(
+                in_chs, in_chs, pool_type=cfg.downsample_pool_type)
         else:
             self.down = nn.Identity()
         self.conv1_1x1 = create_conv2d(in_chs, mid_chs, 1, stride=stride_1)
@@ -1005,7 +1028,8 @@ class MbConvBlock(nn.Module):
         if isinstance(cfg.attn_layer, str):
             if cfg.attn_layer == 'se' or cfg.attn_layer == 'eca':
                 attn_kwargs['act_layer'] = cfg.attn_act_layer
-                attn_kwargs['rd_channels'] = int(cfg.attn_ratio * (out_chs if cfg.expand_output else mid_chs))
+                attn_kwargs['rd_channels'] = int(
+                    cfg.attn_ratio * (out_chs if cfg.expand_output else mid_chs))
 
         # two different orderings for SE and norm2 (due to some weights and trials using SE before norm2)
         if cfg.attn_early:
@@ -1017,8 +1041,10 @@ class MbConvBlock(nn.Module):
             self.norm2 = norm_act_layer(mid_chs)
             self.se = create_attn(cfg.attn_layer, mid_chs, **attn_kwargs)
 
-        self.conv3_1x1 = create_conv2d(mid_chs, out_chs, 1, bias=cfg.output_bias)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.conv3_1x1 = create_conv2d(
+            mid_chs, out_chs, 1, bias=cfg.output_bias)
+        self.drop_path = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
     def init_weights(self, scheme=''):
         named_apply(partial(_init_conv, scheme=scheme), self)
@@ -1065,7 +1091,8 @@ class ConvNeXtBlock(nn.Module):
         out_chs = out_chs or in_chs
         act_layer = get_act_layer(cfg.act_layer)
         if conv_mlp:
-            norm_layer = partial(get_norm_layer(cfg.norm_layer), eps=cfg.norm_eps)
+            norm_layer = partial(get_norm_layer(
+                cfg.norm_layer), eps=cfg.norm_eps)
             mlp_layer = ConvMlp
         else:
             assert 'layernorm' in cfg.norm_layer
@@ -1076,7 +1103,8 @@ class ConvNeXtBlock(nn.Module):
         if stride == 2:
             self.shortcut = Downsample2d(in_chs, out_chs)
         elif in_chs != out_chs:
-            self.shortcut = nn.Conv2d(in_chs, out_chs, kernel_size=1, bias=cfg.output_bias)
+            self.shortcut = nn.Conv2d(
+                in_chs, out_chs, kernel_size=1, bias=cfg.output_bias)
         else:
             self.shortcut = nn.Identity()
 
@@ -1089,7 +1117,8 @@ class ConvNeXtBlock(nn.Module):
             stride_dw = stride
 
         if stride_pool == 2:
-            self.down = Downsample2d(in_chs, in_chs, pool_type=cfg.downsample_pool_type)
+            self.down = Downsample2d(
+                in_chs, in_chs, pool_type=cfg.downsample_pool_type)
         else:
             self.down = nn.Identity()
 
@@ -1097,12 +1126,16 @@ class ConvNeXtBlock(nn.Module):
             in_chs, out_chs, kernel_size=kernel_size, stride=stride_dw, dilation=dilation[1],
             depthwise=True, bias=cfg.output_bias)
         self.norm = norm_layer(out_chs)
-        self.mlp = mlp_layer(out_chs, int(cfg.expand_ratio * out_chs), bias=cfg.output_bias, act_layer=act_layer)
+        self.mlp = mlp_layer(out_chs, int(
+            cfg.expand_ratio * out_chs), bias=cfg.output_bias, act_layer=act_layer)
         if conv_mlp:
-            self.ls = LayerScale2d(out_chs, cfg.init_values) if cfg.init_values else nn.Identity()
+            self.ls = LayerScale2d(
+                out_chs, cfg.init_values) if cfg.init_values else nn.Identity()
         else:
-            self.ls = LayerScale(out_chs, cfg.init_values) if cfg.init_values else nn.Identity()
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+            self.ls = LayerScale(
+                out_chs, cfg.init_values) if cfg.init_values else nn.Identity()
+        self.drop_path = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
         shortcut = self.shortcut(x)
@@ -1125,10 +1158,13 @@ class ConvNeXtBlock(nn.Module):
 
 def window_partition(x, window_size: List[int]):
     B, H, W, C = x.shape
-    _assert(H % window_size[0] == 0, f'height ({H}) must be divisible by window ({window_size[0]})')
+    _assert(H % window_size[0] == 0,
+            f'height ({H}) must be divisible by window ({window_size[0]})')
     _assert(W % window_size[1] == 0, '')
-    x = x.view(B, H // window_size[0], window_size[0], W // window_size[1], window_size[1], C)
-    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size[0], window_size[1], C)
+    x = x.view(B, H // window_size[0], window_size[0],
+               W // window_size[1], window_size[1], C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous(
+    ).view(-1, window_size[0], window_size[1], C)
     return windows
 
 
@@ -1136,17 +1172,21 @@ def window_partition(x, window_size: List[int]):
 def window_reverse(windows, window_size: List[int], img_size: List[int]):
     H, W = img_size
     C = windows.shape[-1]
-    x = windows.view(-1, H // window_size[0], W // window_size[1], window_size[0], window_size[1], C)
+    x = windows.view(-1, H // window_size[0], W //
+                     window_size[1], window_size[0], window_size[1], C)
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, H, W, C)
     return x
 
 
 def grid_partition(x, grid_size: List[int]):
     B, H, W, C = x.shape
-    _assert(H % grid_size[0] == 0, f'height {H} must be divisible by grid {grid_size[0]}')
+    _assert(H % grid_size[0] == 0,
+            f'height {H} must be divisible by grid {grid_size[0]}')
     _assert(W % grid_size[1] == 0, '')
-    x = x.view(B, grid_size[0], H // grid_size[0], grid_size[1], W // grid_size[1], C)
-    windows = x.permute(0, 2, 4, 1, 3, 5).contiguous().view(-1, grid_size[0], grid_size[1], C)
+    x = x.view(B, grid_size[0], H // grid_size[0],
+               grid_size[1], W // grid_size[1], C)
+    windows = x.permute(0, 2, 4, 1, 3, 5).contiguous(
+    ).view(-1, grid_size[0], grid_size[1], C)
     return windows
 
 
@@ -1154,7 +1194,8 @@ def grid_partition(x, grid_size: List[int]):
 def grid_reverse(windows, grid_size: List[int], img_size: List[int]):
     H, W = img_size
     C = windows.shape[-1]
-    x = windows.view(-1, H // grid_size[0], W // grid_size[1], grid_size[0], grid_size[1], C)
+    x = windows.view(-1, H // grid_size[0], W //
+                     grid_size[1], grid_size[0], grid_size[1], C)
     x = x.permute(0, 3, 1, 4, 2, 5).contiguous().view(-1, H, W, C)
     return x
 
@@ -1162,7 +1203,8 @@ def grid_reverse(windows, grid_size: List[int], img_size: List[int]):
 def get_rel_pos_cls(cfg: MaxxVitTransformerCfg, window_size):
     rel_pos_cls = None
     if cfg.rel_pos_type == 'mlp':
-        rel_pos_cls = partial(RelPosMlp, window_size=window_size, hidden_dim=cfg.rel_pos_dim)
+        rel_pos_cls = partial(
+            RelPosMlp, window_size=window_size, hidden_dim=cfg.rel_pos_dim)
     elif cfg.rel_pos_type == 'bias':
         rel_pos_cls = partial(RelPosBias, window_size=window_size)
     return rel_pos_cls
@@ -1181,11 +1223,14 @@ class PartitionAttentionCl(nn.Module):
             drop_path: float = 0.,
     ):
         super().__init__()
-        norm_layer = partial(get_norm_layer(cfg.norm_layer_cl), eps=cfg.norm_eps)  # NOTE this block is channels-last
+        # NOTE this block is channels-last
+        norm_layer = partial(get_norm_layer(
+            cfg.norm_layer_cl), eps=cfg.norm_eps)
         act_layer = get_act_layer(cfg.act_layer)
 
         self.partition_block = partition_type == 'block'
-        self.partition_size = to_2tuple(cfg.window_size if self.partition_block else cfg.grid_size)
+        self.partition_size = to_2tuple(
+            cfg.window_size if self.partition_block else cfg.grid_size)
         rel_pos_cls = get_rel_pos_cls(cfg, self.partition_size)
 
         self.norm1 = norm_layer(dim)
@@ -1198,8 +1243,10 @@ class PartitionAttentionCl(nn.Module):
             attn_drop=cfg.attn_drop,
             proj_drop=cfg.proj_drop,
         )
-        self.ls1 = LayerScale(dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
-        self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.ls1 = LayerScale(
+            dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
+        self.drop_path1 = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp(
@@ -1207,8 +1254,10 @@ class PartitionAttentionCl(nn.Module):
             hidden_features=int(dim * cfg.expand_ratio),
             act_layer=act_layer,
             drop=cfg.proj_drop)
-        self.ls2 = LayerScale(dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
-        self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.ls2 = LayerScale(
+            dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
+        self.drop_path2 = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
     def _partition_attn(self, x):
         img_size = x.shape[1:3]
@@ -1244,7 +1293,9 @@ class ParallelPartitionAttention(nn.Module):
     ):
         super().__init__()
         assert dim % 2 == 0
-        norm_layer = partial(get_norm_layer(cfg.norm_layer_cl), eps=cfg.norm_eps)  # NOTE this block is channels-last
+        # NOTE this block is channels-last
+        norm_layer = partial(get_norm_layer(
+            cfg.norm_layer_cl), eps=cfg.norm_eps)
         act_layer = get_act_layer(cfg.act_layer)
 
         assert cfg.window_size == cfg.grid_size
@@ -1270,8 +1321,10 @@ class ParallelPartitionAttention(nn.Module):
             attn_drop=cfg.attn_drop,
             proj_drop=cfg.proj_drop,
         )
-        self.ls1 = LayerScale(dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
-        self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.ls1 = LayerScale(
+            dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
+        self.drop_path1 = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp(
@@ -1280,15 +1333,18 @@ class ParallelPartitionAttention(nn.Module):
             out_features=dim,
             act_layer=act_layer,
             drop=cfg.proj_drop)
-        self.ls2 = LayerScale(dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
-        self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.ls2 = LayerScale(
+            dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
+        self.drop_path2 = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
     def _partition_attn(self, x):
         img_size = x.shape[1:3]
 
         partitioned_block = window_partition(x, self.partition_size)
         partitioned_block = self.attn_block(partitioned_block)
-        x_window = window_reverse(partitioned_block, self.partition_size, img_size)
+        x_window = window_reverse(
+            partitioned_block, self.partition_size, img_size)
 
         partitioned_grid = grid_partition(x, self.partition_size)
         partitioned_grid = self.attn_grid(partitioned_grid)
@@ -1304,10 +1360,13 @@ class ParallelPartitionAttention(nn.Module):
 
 def window_partition_nchw(x, window_size: List[int]):
     B, C, H, W = x.shape
-    _assert(H % window_size[0] == 0, f'height ({H}) must be divisible by window ({window_size[0]})')
+    _assert(H % window_size[0] == 0,
+            f'height ({H}) must be divisible by window ({window_size[0]})')
     _assert(W % window_size[1] == 0, '')
-    x = x.view(B, C, H // window_size[0], window_size[0], W // window_size[1], window_size[1])
-    windows = x.permute(0, 2, 4, 1, 3, 5).contiguous().view(-1, C, window_size[0], window_size[1])
+    x = x.view(
+        B, C, H // window_size[0], window_size[0], W // window_size[1], window_size[1])
+    windows = x.permute(0, 2, 4, 1, 3, 5).contiguous(
+    ).view(-1, C, window_size[0], window_size[1])
     return windows
 
 
@@ -1315,17 +1374,21 @@ def window_partition_nchw(x, window_size: List[int]):
 def window_reverse_nchw(windows, window_size: List[int], img_size: List[int]):
     H, W = img_size
     C = windows.shape[1]
-    x = windows.view(-1, H // window_size[0], W // window_size[1], C, window_size[0], window_size[1])
+    x = windows.view(-1, H // window_size[0], W //
+                     window_size[1], C, window_size[0], window_size[1])
     x = x.permute(0, 3, 1, 4, 2, 5).contiguous().view(-1, C, H, W)
     return x
 
 
 def grid_partition_nchw(x, grid_size: List[int]):
     B, C, H, W = x.shape
-    _assert(H % grid_size[0] == 0, f'height {H} must be divisible by grid {grid_size[0]}')
+    _assert(H % grid_size[0] == 0,
+            f'height {H} must be divisible by grid {grid_size[0]}')
     _assert(W % grid_size[1] == 0, '')
-    x = x.view(B, C, grid_size[0], H // grid_size[0], grid_size[1], W // grid_size[1])
-    windows = x.permute(0, 3, 5, 1, 2, 4).contiguous().view(-1, C, grid_size[0], grid_size[1])
+    x = x.view(B, C, grid_size[0], H // grid_size[0],
+               grid_size[1], W // grid_size[1])
+    windows = x.permute(0, 3, 5, 1, 2, 4).contiguous(
+    ).view(-1, C, grid_size[0], grid_size[1])
     return windows
 
 
@@ -1333,7 +1396,8 @@ def grid_partition_nchw(x, grid_size: List[int]):
 def grid_reverse_nchw(windows, grid_size: List[int], img_size: List[int]):
     H, W = img_size
     C = windows.shape[1]
-    x = windows.view(-1, H // grid_size[0], W // grid_size[1], C, grid_size[0], grid_size[1])
+    x = windows.view(-1, H // grid_size[0], W //
+                     grid_size[1], C, grid_size[0], grid_size[1])
     x = x.permute(0, 3, 4, 1, 5, 2).contiguous().view(-1, C, H, W)
     return x
 
@@ -1352,11 +1416,13 @@ class PartitionAttention2d(nn.Module):
             drop_path: float = 0.,
     ):
         super().__init__()
-        norm_layer = partial(get_norm_layer(cfg.norm_layer), eps=cfg.norm_eps)  # NOTE this block is channels-last
+        # NOTE this block is channels-last
+        norm_layer = partial(get_norm_layer(cfg.norm_layer), eps=cfg.norm_eps)
         act_layer = get_act_layer(cfg.act_layer)
 
         self.partition_block = partition_type == 'block'
-        self.partition_size = to_2tuple(cfg.window_size if self.partition_block else cfg.grid_size)
+        self.partition_size = to_2tuple(
+            cfg.window_size if self.partition_block else cfg.grid_size)
         rel_pos_cls = get_rel_pos_cls(cfg, self.partition_size)
 
         self.norm1 = norm_layer(dim)
@@ -1369,8 +1435,10 @@ class PartitionAttention2d(nn.Module):
             attn_drop=cfg.attn_drop,
             proj_drop=cfg.proj_drop,
         )
-        self.ls1 = LayerScale2d(dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
-        self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.ls1 = LayerScale2d(
+            dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
+        self.drop_path1 = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
         self.norm2 = norm_layer(dim)
         self.mlp = ConvMlp(
@@ -1378,8 +1446,10 @@ class PartitionAttention2d(nn.Module):
             hidden_features=int(dim * cfg.expand_ratio),
             act_layer=act_layer,
             drop=cfg.proj_drop)
-        self.ls2 = LayerScale2d(dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
-        self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.ls2 = LayerScale2d(
+            dim, init_values=cfg.init_values) if cfg.init_values else nn.Identity()
+        self.drop_path2 = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
 
     def _partition_attn(self, x):
         img_size = x.shape[-2:]
@@ -1413,15 +1483,18 @@ class MaxxVitBlock(nn.Module):
             stride: int = 1,
             conv_cfg: MaxxVitConvCfg = MaxxVitConvCfg(),
             transformer_cfg: MaxxVitTransformerCfg = MaxxVitTransformerCfg(),
-            use_nchw_attn: bool = False,  # FIXME move to cfg? True is ~20-30% faster on TPU, 5-10% slower on GPU
+            # FIXME move to cfg? True is ~20-30% faster on TPU, 5-10% slower on GPU
+            use_nchw_attn: bool = False,
             drop_path: float = 0.,
     ):
         super().__init__()
 
         conv_cls = ConvNeXtBlock if conv_cfg.block_type == 'convnext' else MbConvBlock
-        self.conv = conv_cls(dim, dim_out, stride=stride, cfg=conv_cfg, drop_path=drop_path)
+        self.conv = conv_cls(dim, dim_out, stride=stride,
+                             cfg=conv_cfg, drop_path=drop_path)
 
-        attn_kwargs = dict(dim=dim_out, cfg=transformer_cfg, drop_path=drop_path)
+        attn_kwargs = dict(dim=dim_out, cfg=transformer_cfg,
+                           drop_path=drop_path)
         partition_layer = PartitionAttention2d if use_nchw_attn else PartitionAttentionCl
         self.nchw_attn = use_nchw_attn
         self.attn_block = partition_layer(**attn_kwargs)
@@ -1464,12 +1537,16 @@ class ParallelMaxxVitBlock(nn.Module):
 
         conv_cls = ConvNeXtBlock if conv_cfg.block_type == 'convnext' else MbConvBlock
         if num_conv > 1:
-            convs = [conv_cls(dim, dim_out, stride=stride, cfg=conv_cfg, drop_path=drop_path)]
-            convs += [conv_cls(dim_out, dim_out, cfg=conv_cfg, drop_path=drop_path)] * (num_conv - 1)
+            convs = [conv_cls(dim, dim_out, stride=stride,
+                              cfg=conv_cfg, drop_path=drop_path)]
+            convs += [conv_cls(dim_out, dim_out, cfg=conv_cfg,
+                               drop_path=drop_path)] * (num_conv - 1)
             self.conv = nn.Sequential(*convs)
         else:
-            self.conv = conv_cls(dim, dim_out, stride=stride, cfg=conv_cfg, drop_path=drop_path)
-        self.attn = ParallelPartitionAttention(dim=dim_out, cfg=transformer_cfg, drop_path=drop_path)
+            self.conv = conv_cls(dim, dim_out, stride=stride,
+                                 cfg=conv_cfg, drop_path=drop_path)
+        self.attn = ParallelPartitionAttention(
+            dim=dim_out, cfg=transformer_cfg, drop_path=drop_path)
 
     def init_weights(self, scheme=''):
         named_apply(partial(_init_transformer, scheme=scheme), self.attn)
@@ -1567,13 +1644,15 @@ class Stem(nn.Module):
         if not isinstance(out_chs, (list, tuple)):
             out_chs = to_2tuple(out_chs)
 
-        norm_act_layer = partial(get_norm_act_layer(norm_layer, act_layer), eps=norm_eps)
+        norm_act_layer = partial(get_norm_act_layer(
+            norm_layer, act_layer), eps=norm_eps)
         self.out_chs = out_chs[-1]
         self.stride = 2
 
         self.conv1 = create_conv2d(in_chs, out_chs[0], kernel_size, stride=2)
         self.norm1 = norm_act_layer(out_chs[0])
-        self.conv2 = create_conv2d(out_chs[0], out_chs[1], kernel_size, stride=1)
+        self.conv2 = create_conv2d(
+            out_chs[0], out_chs[1], kernel_size, stride=1)
 
     def init_weights(self, scheme=''):
         named_apply(partial(_init_conv, scheme=scheme), self)
@@ -1629,15 +1708,17 @@ class MaxxVit(nn.Module):
         )
 
         stride = self.stem.stride
-        feat_size = tuple([i // s for i, s in zip(img_size, to_2tuple(stride))])
+        feat_size = tuple(
+            [i // s for i, s in zip(img_size, to_2tuple(stride))])
 
         num_stages = len(cfg.embed_dim)
         assert len(cfg.depths) == num_stages
-        dpr = [x.tolist() for x in torch.linspace(0, drop_path_rate, sum(cfg.depths)).split(cfg.depths)]
+        dpr = [x.tolist() for x in torch.linspace(
+            0, drop_path_rate, sum(cfg.depths)).split(cfg.depths)]
         in_chs = self.stem.out_chs
-        #final_norm_layer = get_norm_layer(cfg.transformer_cfg.norm_layer)
+        # final_norm_layer = get_norm_layer(cfg.transformer_cfg.norm_layer)
         stages = []
-        #norms = []
+        # norms = []
         for i in range(num_stages):
             stage_stride = 2
             out_chs = cfg.embed_dim[i]
@@ -1652,23 +1733,25 @@ class MaxxVit(nn.Module):
                 feat_size=feat_size,
                 drop_path=dpr[i],
             )]
-            #norms.append(final_norm_layer(out_chs, eps=cfg.transformer_cfg.norm_eps))
+            # norms.append(final_norm_layer(out_chs, eps=cfg.transformer_cfg.norm_eps))
             stride *= stage_stride
             in_chs = out_chs
         self.stages = nn.Sequential(*stages)
-        #self.norms = nn.Sequential(*norms)
+        # self.norms = nn.Sequential(*norms)
 
         final_norm_layer = get_norm_layer(cfg.transformer_cfg.norm_layer)
-        self.norm = final_norm_layer(self.num_features, eps=cfg.transformer_cfg.norm_eps)
-        
+        self.norm = final_norm_layer(
+            self.num_features, eps=cfg.transformer_cfg.norm_eps)
 
         # Classifier head
-        #self.head = ClassifierHead(self.num_features, num_classes, pool_type=global_pool, drop_rate=drop_rate)
+        # self.head = ClassifierHead(self.num_features, num_classes, pool_type=global_pool, drop_rate=drop_rate)
 
         # Weight init (default PyTorch init works well for AdamW if scheme not set)
-        assert cfg.weight_init in ('', 'normal', 'trunc_normal', 'xavier_normal', 'vit_eff')
+        assert cfg.weight_init in (
+            '', 'normal', 'trunc_normal', 'xavier_normal', 'vit_eff')
         if cfg.weight_init:
-            named_apply(partial(self._init_weights, scheme=cfg.weight_init), self)
+            named_apply(partial(self._init_weights,
+                        scheme=cfg.weight_init), self)
 
     def _init_weights(self, module, name, scheme=''):
         if hasattr(module, 'init_weights'):
@@ -1704,24 +1787,25 @@ class MaxxVit(nn.Module):
         self.num_classes = num_classes
         if global_pool is None:
             global_pool = self.head.global_pool.pool_type
-        self.head = ClassifierHead(self.num_features, num_classes, pool_type=global_pool, drop_rate=self.drop_rate)
+        self.head = ClassifierHead(
+            self.num_features, num_classes, pool_type=global_pool, drop_rate=self.drop_rate)
 
     def forward_features(self, x):
         x = self.stem(x)
-        #print(x.shape)
-        #print(len(self.stages))
+        # print(x.shape)
+        # print(len(self.stages))
         features = []
         for i in range(len(self.stages)):
             x = self.stages[i](x)
-            #print(x.shape)
-            if(i==len(self.stages)-1):
+            # print(x.shape)
+            if (i == len(self.stages)-1):
                 features.append(self.norm(x))
             else:
                 features.append(x)
-            #features.append(self.norms[i](x))
-        #x = self.stages(x)
-        #print(x.shape)
-        #x = self.norm(x)
+            # features.append(self.norms[i](x))
+        # x = self.stages(x)
+        # print(x.shape)
+        # x = self.norm(x)
         return features
 
     def forward_head(self, x, pre_logits: bool = False):
@@ -1729,7 +1813,7 @@ class MaxxVit(nn.Module):
 
     def forward(self, x):
         x = self.forward_features(x)
-        #x = self.forward_head(x)
+        # x = self.forward_head(x)
         return x
 
 
